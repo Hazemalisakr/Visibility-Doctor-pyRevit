@@ -1,0 +1,9 @@
+{
+    "builtin": false,
+    "default_enabled": true,
+    "type": "extension",
+    "rocket_mode_compatible": true,
+    "name": "VisibilityDoctor",
+    "description": "Diagnose element visibility issues in Revit views",
+    "author": "Author"
+}

@@ -1,0 +1,150 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Visibility Doctor"
+        Width="700" Height="920"
+        MinWidth="520" MinHeight="500"
+        WindowStartupLocation="CenterScreen"
+        Background="#F5F0E8">
+
+    <Window.Resources>
+        <!-- Section card -->
+        <Style x:Key="Card" TargetType="Border">
+            <Setter Property="Background" Value="White"/>
+            <Setter Property="BorderBrush" Value="#E0E0E0"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="4"/>
+            <Setter Property="Padding" Value="14"/>
+            <Setter Property="Margin" Value="0,0,0,8"/>
+        </Style>
+
+        <Style x:Key="SectionTitle" TargetType="TextBlock">
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="#3B332E"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Margin" Value="0,0,0,6"/>
+        </Style>
+
+        <!-- Accent button template -->
+        <Style x:Key="AccentButton" TargetType="Button">
+            <Setter Property="Background" Value="#4C2335"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="btnBorder"
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="4" Padding="8,6"
+                                BorderThickness="0">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="btnBorder" Property="Background" Value="#E07856"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="btnBorder" Property="Background" Value="#3B332E"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="btnBorder" Property="Background" Value="#BDBDBD"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- ═══ TITLE BAR ═══ -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,10">
+            <TextBlock Text="VISIBILITY DOCTOR" FontSize="22" FontWeight="Bold"
+                       Foreground="#4C2335"/>
+            <TextBlock Text="Diagnose why an element is not visible in a view"
+                       Foreground="#3B332E" FontSize="12" Margin="0,2,0,0"/>
+        </StackPanel>
+
+        <!-- ═══ INPUT SECTION ═══ -->
+        <StackPanel Grid.Row="1">
+
+            <!-- Target Document -->
+            <Border Style="{StaticResource Card}">
+                <StackPanel>
+                    <TextBlock Text="Target Document" Style="{StaticResource SectionTitle}"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,2">
+                        <RadioButton x:Name="rbCurrentModel" Content="Current Model"
+                                     IsChecked="True" Margin="0,0,20,0"
+                                     GroupName="DocTarget" VerticalContentAlignment="Center"/>
+                        <RadioButton x:Name="rbLinkedModel" Content="Linked Model"
+                                     GroupName="DocTarget" VerticalContentAlignment="Center"/>
+                    </StackPanel>
+                    <StackPanel x:Name="pnlLinkSelect" Visibility="Collapsed" Margin="0,8,0,0">
+                        <TextBlock Text="Linked Model  (type below to filter)" FontSize="11"
+                                   Foreground="#3B332E" Margin="0,0,0,4"/>
+                        <TextBox x:Name="txtLinkFilter" Height="24" Padding="6,2"
+                                 Margin="0,0,0,4" FontSize="12"
+                                 VerticalContentAlignment="Center"/>
+                        <ComboBox x:Name="cmbLinkedModel" Height="26" FontSize="12"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Element ID -->
+            <Border Style="{StaticResource Card}">
+                <StackPanel>
+                    <TextBlock Text="Element ID" Style="{StaticResource SectionTitle}"/>
+                    <TextBox x:Name="txtElementId" Height="28"
+                             VerticalContentAlignment="Center" Padding="6,2"
+                             FontSize="13"/>
+                </StackPanel>
+            </Border>
+
+            <!-- View Selection -->
+            <Border Style="{StaticResource Card}">
+                <StackPanel>
+                    <TextBlock Text="View  (type below to filter)" Style="{StaticResource SectionTitle}"/>
+                    <TextBox x:Name="txtViewFilter" Height="24" Padding="6,2"
+                             Margin="0,0,0,4" FontSize="12"
+                             VerticalContentAlignment="Center"/>
+                    <ComboBox x:Name="cmbView" Height="28" FontSize="12"/>
+                </StackPanel>
+            </Border>
+
+            <!-- Diagnose Button -->
+            <Button x:Name="btnDiagnose" Content="DIAGNOSE" Height="40"
+                    Style="{StaticResource AccentButton}"
+                    Margin="0,2,0,5"/>
+
+            <!-- LinkedIn Button -->
+            <Button x:Name="btnLinkedIn" Content="Connect on LinkedIn" Height="26"
+                    Background="Transparent" BorderThickness="0"
+                    Foreground="#E07856" FontWeight="SemiBold" Cursor="Hand"
+                    Margin="0,0,0,10"/>
+        </StackPanel>
+
+        <!-- ═══ RESULTS SECTION ═══ -->
+        <Border Grid.Row="2" x:Name="borderResults" Visibility="Collapsed"
+                Background="White" BorderBrush="#E0E0E0" BorderThickness="1"
+                CornerRadius="4">
+            <DockPanel>
+                <TextBlock DockPanel.Dock="Top" Text="RESULTS" FontWeight="Bold"
+                           FontSize="14" Foreground="#4C2335"
+                           Margin="14,10,14,4"/>
+                <ScrollViewer VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled"
+                              Margin="14,0,14,14">
+                    <StackPanel x:Name="pnlResults"/>
+                </ScrollViewer>
+            </DockPanel>
+        </Border>
+    </Grid>
+</Window>
