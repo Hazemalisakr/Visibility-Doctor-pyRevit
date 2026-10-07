@@ -37,9 +37,8 @@ display a custom icon on the ribbon button.
 | Admin rights     | Not required                           |
 | External packages| None                                   |
 
-## Limitations (V1)
+## Advanced Capabilities
 
-- **Link diagnosis** is a stub — selecting "Linked Model" will inform you
-  that link diagnosis is not yet implemented.
-- Geometry checks (view range, crop region, section box) are **not in scope**
-  for V1 but the engine is structured to accept a `diagnose_geometry()` step.
+- **Linked Model Diagnosis**: Fully supports querying and diagnosing elements inside linked Revit models.
+- **Geometric Clashes & Masking**: Diagnoses geometric occlusion, including view ranges, section boxes, crop regions, and 2D masking regions (Filled Regions / Detail Items) that might be obscuring your elements.
+- **Link Transforms**: Properly calculates position and overlap accounting for Link Instance transforms.

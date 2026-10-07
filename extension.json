@@ -5,5 +5,5 @@
     "rocket_mode_compatible": true,
     "name": "VisibilityDoctor",
     "description": "Diagnose element visibility issues in Revit views",
-    "author": "Author"
+    "author": "Hazem Sakr"
 }
