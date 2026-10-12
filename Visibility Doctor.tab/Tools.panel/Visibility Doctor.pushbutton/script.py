@@ -78,8 +78,10 @@ BLOCKER_PRIORITY = {
     "LINK_INSTANCE_HIDDEN":       1,
     "LINK_CAT_HIDDEN":            2,
     "LINK_WORKSET_HIDDEN":        3,
-    "LINK_PHASE_DONT_SHOW":       4,
-    "LINK_DESIGN_OPTION_MISMATCH": 5,
+    "LINK_ELEM_WORKSET_CLOSED":   4,
+    "LINK_ELEM_WORKSET_HOST_HIDDEN": 5,
+    "LINK_PHASE_DONT_SHOW":       6,
+    "LINK_DESIGN_OPTION_MISMATCH": 7,
     "ELEM_NOT_FOUND":             10,
     "ELEM_IS_TYPE":               11,
     "ELEM_NO_CATEGORY":           12,
@@ -96,6 +98,8 @@ BLOCKER_PRIORITY = {
     "GEOM_OUTSIDE_CROP":          23,
     "GEOM_OUTSIDE_SECTION_BOX":   24,
     "GEOM_MASKED":                25,
+    "LINK_ELEM_WORKSET_CUSTOM":   26,
+    "LINK_ELEM_WORKSET_BY_HOST":  27,
 }
 
 # BuiltInParameter IDs used for view-template V/G-group mapping.
@@ -1628,22 +1632,22 @@ def diagnose_link_display_settings(host_doc, link_instance, view):
 
     GetLinkOverrides takes an ElementId — we use the RevitLinkInstance Id.
     If that fails we fall back to the RevitLinkType Id.
-    This is noted in the API ASSUMPTIONS for manual verification.
 
-    Returns (results, mode_string).
+    Returns (results, mode_string, linked_view_id_out, template_name).
     mode_string is one of "ByHostView", "ByLinkedView", "Custom", "Unknown".
     """
     SRC = "diagnose_link_display_settings"
     results = []
     mode = "Unknown"
     linked_view_id_out = None
+    template_name = None
 
     if not hasattr(view, "GetLinkOverrides"):
         results.append(_unknown(
             "LINK_DISPLAY_UNKNOWN", "Link Display Settings",
             "View.GetLinkOverrides is not available in this API version.",
             SRC))
-        return results, mode, None
+        return results, mode, None, None
 
     # If a view template controls Revit Links, we must get overrides from the template.
     effective_view = view
@@ -1657,6 +1661,7 @@ def diagnose_link_display_settings(host_doc, link_instance, view):
                     bip = BuiltInParameter.VIS_GRAPHICS_RVT_LINKS
                     if ElementId(bip) in ctrl_ids:
                         effective_view = tmpl
+                        template_name = getattr(tmpl, "Name", None) or str(tmpl_id.IntegerValue)
     except Exception:
         pass
 
@@ -1680,17 +1685,18 @@ def diagnose_link_display_settings(host_doc, link_instance, view):
             "LINK_DISPLAY_UNKNOWN", "Link Display Settings",
             "Unable to retrieve link overrides "
             "(tried instance Id and type Id).", SRC))
-        return results, mode, None
+        return results, mode, None, template_name
 
-    # Read the mode
-    # RevitLinkGraphicsSettings has LinkedViewId and a
-    # GetLinkVisibilityType() or similar member.
+    # Read the mode (LinkVisibilityType property / GetLinkVisibilityType() method)
     try:
-        # Try GetLinkVisibilityType()  (returns LinkVisibility enum)
-        if hasattr(settings, "GetLinkVisibilityType"):
+        vis_type = None
+        if hasattr(settings, "LinkVisibilityType"):
+            vis_type = settings.LinkVisibilityType
+        elif hasattr(settings, "GetLinkVisibilityType"):
             vis_type = settings.GetLinkVisibilityType()
-            vis_name = str(vis_type).split(".")[-1]
 
+        if vis_type is not None:
+            vis_name = str(vis_type).split(".")[-1]
             if hasattr(LinkVisibility, "ByHostView"):
                 if vis_type == LinkVisibility.ByHostView:
                     mode = "ByHostView"
@@ -1714,7 +1720,7 @@ def diagnose_link_display_settings(host_doc, link_instance, view):
         results.append(_unknown(
             "LINK_DISPLAY_UNKNOWN", "Link Display Mode",
             "Unable to determine display mode: %s" % str(ex), SRC))
-        return results, mode, None
+        return results, mode, None, template_name
 
     # LinkedViewId for ByLinkedView mode
     try:
@@ -1725,11 +1731,13 @@ def diagnose_link_display_settings(host_doc, link_instance, view):
     except Exception:
         pass
 
+    tmpl_desc = (u" (controlled by View Template '%s')" % template_name) if template_name else ""
+
     if mode == "ByHostView":
         results.append(_pass(
-            "LINK_DISPLAY_BY_HOST", "Display: By Host View",
-            "Link is displayed using the host view's V/G settings "
-            "(retrieved via %s)." % used_id_label, SRC))
+            "LINK_DISPLAY_BY_HOST", "Display: By Host View%s" % (" (Template)" if template_name else ""),
+            "Link is displayed using the host view's V/G settings%s "
+            "(retrieved via %s)." % (tmpl_desc, used_id_label), SRC))
     elif mode == "ByLinkedView":
         lv_name = ""
         if linked_view_id_out:
@@ -1741,22 +1749,22 @@ def diagnose_link_display_settings(host_doc, link_instance, view):
             except Exception:
                 lv_name = str(linked_view_id_out.IntegerValue)
         results.append(_pass(
-            "LINK_DISPLAY_BY_LINKED", "Display: By Linked View",
-            "Link is displayed using linked view '%s' "
-            "(retrieved via %s)." % (lv_name, used_id_label), SRC))
+            "LINK_DISPLAY_BY_LINKED", "Display: By Linked View%s" % (" (Template)" if template_name else ""),
+            "Link is displayed using linked view '%s'%s "
+            "(retrieved via %s)." % (lv_name, tmpl_desc, used_id_label), SRC))
     elif mode == "Custom":
         results.append(_warning(
-            "LINK_DISPLAY_CUSTOM", "Display: Custom Settings",
-            "Link uses custom display settings.  Custom settings are "
-            "not fully inspectable via the Revit 2024 API; some checks "
-            "below may be UNKNOWN.",
-            DiagResult.CONFIDENCE_POSSIBLE, SRC))
+            "LINK_DISPLAY_CUSTOM", "Display: Custom Settings%s" % (" (Template)" if template_name else ""),
+            "Link uses Custom display settings in this view%s. "
+            "In Custom mode, individual linked worksets and category overrides "
+            "can be independently hidden or overridden." % tmpl_desc,
+            DiagResult.CONFIDENCE_CONFIRMED, SRC))
     else:
         results.append(_unknown(
             "LINK_DISPLAY_UNKNOWN", "Link Display Mode",
             "Display mode is '%s' — unable to interpret." % mode, SRC))
 
-    return results, mode, linked_view_id_out
+    return results, mode, linked_view_id_out, template_name
 
 
 # L4 ────────────────────────────────────────────────────────────────────
@@ -1787,15 +1795,108 @@ def _map_linked_cat_to_host(host_doc, linked_element):
     return None, cat_name
 
 
+def diagnose_linked_element_workset(
+    host_doc, link_doc, link_instance, linked_element, host_view, display_mode, template_name=None
+):
+    """Diagnose workset visibility for an element inside a linked model."""
+    SRC = "diagnose_linked_element_workset"
+    results = []
+
+    ws_id = getattr(linked_element, "WorksetId", None)
+    if not ws_id or ws_id.IntegerValue <= 0:
+        results.append(_pass(
+            "LINK_WORKSET_NONE", "Linked Element Workset",
+            "Element does not belong to a user workset in the linked model.", SRC))
+        return results
+
+    ws_name = "ID %d" % ws_id.IntegerValue
+    is_open = True
+    try:
+        wt = link_doc.GetWorksetTable()
+        ws = wt.GetWorkset(ws_id)
+        if ws:
+            ws_name = ws.Name
+            is_open = ws.IsOpen
+    except Exception:
+        pass
+
+    li_name = getattr(link_instance, "Name", "") or "Linked Model"
+
+    # 1. Is the workset completely CLOSED in the link document?
+    if not is_open:
+        results.append(_error(
+            "LINK_ELEM_WORKSET_CLOSED",
+            "Linked Workset Closed: '%s'" % ws_name,
+            "Workset '%s' is closed in the linked model. Elements on closed worksets "
+            "are not loaded into Revit memory and cannot appear in any view. "
+            "To fix this: Go to Manage tab > Manage Links > select '%s' > "
+            "click 'Manage Worksets', select '%s' and click 'Open'."
+            % (ws_name, li_name, ws_name),
+            DiagResult.CONFIDENCE_CONFIRMED, SRC))
+        return results
+
+    # 2. If Link Display Settings is Custom:
+    if display_mode == "Custom":
+        tmpl_info = (u" (controlled by View Template '%s')" % template_name) if template_name else ""
+        tmpl_dlg = (u"View Template '%s'" % template_name) if template_name else u"Visibility/Graphics (VG)"
+        results.append(_warning(
+            "LINK_ELEM_WORKSET_CUSTOM",
+            "Check Link Workset Overrides: '%s'" % ws_name,
+            "The element belongs to workset '%s' in the linked model, and the link's "
+            "Display Settings are set to 'Custom' in this view%s.\n\n"
+            "In Custom mode, individual linked worksets can be turned off in the host view. "
+            "Because the Revit API does not expose the per-view checkboxes for linked worksets, "
+            "verify that this workset is turned on:\n"
+            "1. Open %s > Revit Links tab.\n"
+            "2. Click the Display Settings button for '%s'.\n"
+            "3. In the Worksets tab, ensure '%s' is checked and set to Open."
+            % (ws_name, tmpl_info, tmpl_dlg, li_name, ws_name),
+            DiagResult.CONFIDENCE_POSSIBLE, SRC))
+        return results
+
+    # 3. If Link Display Settings is ByHostView:
+    host_match_hidden = False
+    if host_doc.IsWorkshared:
+        try:
+            for hw in FilteredWorksetCollector(host_doc).OfKind(WorksetKind.UserWorkset):
+                if hw.Name.strip().lower() == ws_name.strip().lower():
+                    vis = host_view.GetWorksetVisibility(hw.Id)
+                    if vis == WorksetVisibility.Hidden:
+                        host_match_hidden = True
+                        results.append(_error(
+                            "LINK_ELEM_WORKSET_HOST_HIDDEN",
+                            "Matching Host Workset Hidden: '%s'" % ws_name,
+                            "Host workset '%s' is explicitly hidden in this view's Visibility/Graphics. "
+                            "Under 'By Host View', linked elements on workset '%s' may be hidden "
+                            "by the matching host workset override."
+                            % (ws_name, ws_name),
+                            DiagResult.CONFIDENCE_CONFIRMED, SRC))
+                        break
+        except Exception:
+            pass
+
+    if not host_match_hidden:
+        results.append(_warning(
+            "LINK_ELEM_WORKSET_BY_HOST",
+            "Linked Workset: '%s'" % ws_name,
+            "The element belongs to workset '%s' in the linked model. "
+            "Under 'By Host View', verify that this workset was not closed upon loading "
+            "(Manage > Manage Links > Manage Worksets) and that host view workset rules do not hide it."
+            % ws_name,
+            DiagResult.CONFIDENCE_POSSIBLE, SRC))
+
+    return results
+
+
 def diagnose_link_element_in_context(
     host_doc, link_doc, link_instance, linked_element,
-    host_view, display_mode, linked_view_id
+    host_view, display_mode, linked_view_id, template_name=None
 ):
     """Element-level checks, branched by display mode.
 
-    - ByHostView:  map category to host, check host V/G.
+    - ByHostView:  map category to host, check host V/G + linked worksets.
     - ByLinkedView: re-run Pass 1 engine on linked doc + linked view.
-    - Custom:      partial checks, rest UNKNOWN.
+    - Custom:      check host/link category + linked worksets + geometry & masking.
     """
     SRC = "diagnose_link_element_in_context"
     results = []
@@ -1807,14 +1908,14 @@ def diagnose_link_element_in_context(
 
     if display_mode == "ByHostView":
         return _check_by_host_view(
-            host_doc, link_doc, link_instance, linked_element, host_view)
+            host_doc, link_doc, link_instance, linked_element, host_view, template_name)
 
     # Custom or Unknown — partial
     return _check_custom_mode(
-        host_doc, link_doc, linked_element, host_view)
+        host_doc, link_doc, link_instance, linked_element, host_view, template_name)
 
 
-def _check_by_host_view(host_doc, link_doc, link_instance, linked_element, host_view):
+def _check_by_host_view(host_doc, link_doc, link_instance, linked_element, host_view, template_name=None):
     """ByHostView: use host view V/G for linked element's category."""
     SRC = "diagnose_link_element_by_host"
     results = []
@@ -1908,12 +2009,9 @@ def _check_by_host_view(host_doc, link_doc, link_instance, linked_element, host_
     except Exception:
         pass
 
-    # --- Linked workset / phase: UNKNOWN (cross-doc) ---
-    results.append(_unknown(
-        "LINK_ELEM_WORKSET_UNKNOWN",
-        "Linked Element Workset (By Host View)",
-        "Workset visibility for elements inside a linked model cannot be "
-        "reliably determined from the host view in By Host View mode.", SRC))
+    # --- Linked element workset diagnosis ---
+    results.extend(diagnose_linked_element_workset(
+        host_doc, link_doc, link_instance, linked_element, host_view, "ByHostView", template_name))
 
     results.append(_unknown(
         "LINK_ELEM_PHASE_UNKNOWN",
@@ -2009,8 +2107,8 @@ def _check_by_linked_view(
     return results
 
 
-def _check_custom_mode(host_doc, link_doc, linked_element, host_view):
-    """Custom display: partial inspection, rest UNKNOWN."""
+def _check_custom_mode(host_doc, link_doc, link_instance, linked_element, host_view, template_name=None):
+    """Custom display: category, worksets, geometry & masking."""
     SRC = "diagnose_link_element_custom"
     results = []
 
@@ -2021,26 +2119,34 @@ def _check_custom_mode(host_doc, link_doc, linked_element, host_view):
             if host_view.GetCategoryHidden(host_cat_id):
                 results.append(_error(
                     "CAT_HIDDEN",
-                    "Category Hidden (Custom Mode)",
-                    "Category '%s' is hidden in the host view.  "
-                    "Custom mode still respects host category visibility."
+                    "Category Hidden (Host V/G)",
+                    "Category '%s' is hidden in the host view's Visibility/Graphics.  "
+                    "Custom mode still respects host category visibility unless overridden."
                     % cat_name,
                     DiagResult.CONFIDENCE_POSSIBLE, SRC))
             else:
                 results.append(_pass(
                     "CAT_VISIBLE",
-                    "Category Visible (Custom Mode)",
+                    "Category Visible (Host V/G)",
                     "Category '%s' appears visible in the host view."
                     % cat_name, SRC))
         except Exception:
             pass
 
-    results.append(_unknown(
-        "LINK_CUSTOM_UNKNOWN",
-        "Custom Display Settings",
-        "Custom link display settings are not fully inspectable via the "
-        "Revit 2024 API.  Filter, workset, and phase overrides within "
-        "the custom configuration cannot be determined.", SRC))
+    # Workset check in Custom mode
+    results.extend(diagnose_linked_element_workset(
+        host_doc, link_doc, link_instance, linked_element, host_view, "Custom", template_name))
+
+    # Geometry and Masking (Host View vs Linked Element)
+    try:
+        link_transform = link_instance.GetTotalTransform()
+        results.extend(diagnose_geometry_visibility(host_doc, linked_element, host_view, link_transform))
+        results.extend(diagnose_masking_occlusion(host_doc, linked_element, host_view, link_transform))
+    except Exception as ex:
+        results.append(_unknown(
+            "LINK_GEOM_UNKNOWN",
+            "Linked Geometry Checks",
+            "Unable to run geometric or masking checks for the linked element: %s" % str(ex), SRC))
 
     return results
 
@@ -2072,7 +2178,7 @@ def run_link_checks(host_doc, link_instance, element_id, host_view):
     )
 
     # L3: display settings
-    disp_results, mode, linked_view_id = diagnose_link_display_settings(
+    disp_results, mode, linked_view_id, tmpl_name = diagnose_link_display_settings(
         host_doc, link_instance, host_view)
     all_results.extend(disp_results)
 
@@ -2089,7 +2195,7 @@ def run_link_checks(host_doc, link_instance, element_id, host_view):
     else:
         elem_results = diagnose_link_element_in_context(
             host_doc, link_doc, link_instance, linked_element,
-            host_view, mode, linked_view_id)
+            host_view, mode, linked_view_id, tmpl_name)
         all_results.extend(elem_results)
 
     return all_results, linked_element
@@ -2454,9 +2560,9 @@ class VisibilityDoctorWindow(forms.WPFWindow):
                 u"POSSIBLE ISSUE", pos,
                 self._br_bg_orange, self._br_orange)
 
-        # Unknown items (skip cross-document API limitations to reduce clutter for visible elements)
+        # Unknown items (skip expected cross-doc phase limitation to avoid noise)
         for unk in classified["unknown"]:
-            if unk.code in ("LINK_ELEM_WORKSET_UNKNOWN", "LINK_ELEM_PHASE_UNKNOWN"):
+            if unk.code in ("LINK_ELEM_PHASE_UNKNOWN",):
                 continue
             self._add_section_card(
                 u"UNABLE TO DETERMINE", unk,
@@ -2465,8 +2571,8 @@ class VisibilityDoctorWindow(forms.WPFWindow):
         # All-clear vs Inconclusive
         if not primary and not classified["secondary"]:
             inconclusive = classified["possible"] + classified["unknown"]
-            # Filter out expected cross-document API limitations
-            real_inconclusive = [r for r in inconclusive if r.code not in ("LINK_ELEM_WORKSET_UNKNOWN", "LINK_ELEM_PHASE_UNKNOWN")]
+            # Filter out expected cross-document phase limitation
+            real_inconclusive = [r for r in inconclusive if r.code not in ("LINK_ELEM_PHASE_UNKNOWN",)]
             
             if not real_inconclusive:
                 self._add_all_clear()
