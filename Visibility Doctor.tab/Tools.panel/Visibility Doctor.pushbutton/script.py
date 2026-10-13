@@ -78,6 +78,7 @@ BLOCKER_PRIORITY = {
     "LINK_INSTANCE_HIDDEN":       1,
     "LINK_CAT_HIDDEN":            2,
     "LINK_WORKSET_HIDDEN":        3,
+    "LINK_CUSTOM_OVERRIDE_BLOCKER": 3,
     "LINK_ELEM_WORKSET_CLOSED":   4,
     "LINK_ELEM_WORKSET_HOST_HIDDEN": 5,
     "LINK_PHASE_DONT_SHOW":       6,
@@ -1704,18 +1705,15 @@ def diagnose_link_display_settings(host_doc, link_instance, view):
             vis_type = settings.GetLinkVisibilityType()
 
         if vis_type is not None:
-            vis_name = str(vis_type).split(".")[-1]
-            if hasattr(LinkVisibility, "ByHostView"):
-                if vis_type == LinkVisibility.ByHostView:
-                    mode = "ByHostView"
-                elif vis_type == LinkVisibility.ByLinkedView:
-                    mode = "ByLinkedView"
-                elif vis_type == LinkVisibility.Custom:
-                    mode = "Custom"
-                else:
-                    mode = vis_name
+            vis_str = str(vis_type).split(".")[-1].strip()
+            if "Host" in vis_str:
+                mode = "ByHostView"
+            elif "Link" in vis_str:
+                mode = "ByLinkedView"
+            elif "Custom" in vis_str:
+                mode = "Custom"
             else:
-                mode = vis_name
+                mode = vis_str
         else:
             # Fallback: check LinkedViewId
             if hasattr(settings, "LinkedViewId"):
@@ -1855,6 +1853,8 @@ def diagnose_linked_element_workset(
 
     # 2. If Link Display Settings is Custom:
     if display_mode == "Custom":
+        if is_element_rendered is not None:
+            return results
         tmpl_info = (u" (controlled by View Template '%s')" % template_name) if template_name else ""
         tmpl_dlg = (u"View Template '%s'" % template_name) if template_name else u"Visibility/Graphics (VG)"
         results.append(_warning(
@@ -2202,42 +2202,101 @@ def _check_custom_mode(host_doc, link_doc, link_instance, linked_element, host_v
     SRC = "diagnose_link_element_custom"
     results = []
 
-    # Category visibility in host view (still applies in custom)
     host_cat_id, cat_name = _map_linked_cat_to_host(host_doc, linked_element)
+
+    # 1. Geometry and Masking (Host View vs Linked Element)
+    geom_results = []
+    try:
+        link_transform = link_instance.GetTotalTransform()
+        geom_results.extend(diagnose_geometry_visibility(host_doc, linked_element, host_view, link_transform))
+        geom_results.extend(diagnose_masking_occlusion(host_doc, linked_element, host_view, link_transform))
+    except Exception as ex:
+        geom_results.append(_unknown(
+            "LINK_GEOM_UNKNOWN",
+            "Linked Geometry Checks",
+            "Unable to run geometric or masking checks for the linked element: %s" % str(ex), SRC))
+
+    geom_blocked = any(r.status == DiagResult.STATUS_BLOCKED for r in geom_results)
+
+    # 2. Case A: Element IS confirmed rendered in the view
+    if is_element_rendered is True:
+        results.append(_pass(
+            "CAT_VISIBLE",
+            "Category Visible (Custom Link)",
+            "Category '%s' is confirmed visible in this view under Custom display settings."
+            % (cat_name or "Element"), SRC))
+        results.extend(diagnose_linked_element_workset(
+            host_doc, link_doc, link_instance, linked_element, host_view, "Custom", template_name, is_element_rendered=True))
+        results.extend(geom_results)
+        return results
+
+    # 3. Case B: Element is NOT rendered in the view
+    if is_element_rendered is False:
+        # If geometry (view range / crop / section box) blocked it, report geometry as the primary blocker
+        if geom_blocked:
+            results.extend(geom_results)
+            return results
+
+        # Geometry is within range! Under Custom mode, the link has independent V/G overrides:
+        # The user can turn off the Category (e.g. Walls) or Worksets specifically for this link.
+        li_name = getattr(link_instance, "Name", "") or "Linked Model"
+        ws_id = getattr(linked_element, "WorksetId", None)
+        ws_name = "Workset"
+        if ws_id and ws_id.IntegerValue > 0:
+            try:
+                ws = link_doc.GetWorksetTable().GetWorkset(ws_id)
+                if ws: ws_name = ws.Name
+            except Exception:
+                pass
+        tmpl_desc = (u"View Template '%s'" % template_name) if template_name else u"Visibility/Graphics (VG)"
+        results.append(_error(
+            "LINK_CUSTOM_OVERRIDE_BLOCKER",
+            "Link Category or Workset Overridden: '%s'" % (cat_name or "Element"),
+            "The element is not rendered in this view, and this link uses 'Custom' display settings "
+            "(controlled by %s).\n\n"
+            "In Custom mode, individual categories (such as '%s') and worksets can be turned off "
+            "specifically for this link without affecting the host view. "
+            "Because the Revit API does not expose per-link category checkboxes to add-ins, verify:\n\n"
+            "1. Open %s > Revit Links tab.\n"
+            "2. Click the Display Settings button for '%s'.\n"
+            "3. In the Model Categories tab, ensure '%s' is checked.\n"
+            "4. In the Worksets tab, ensure '%s' is checked and set to Open.\n"
+            "5. If both are on, the element may have been manually hidden in view (HE / Reveal Hidden)."
+            % (tmpl_desc, cat_name or "Category", tmpl_desc, li_name, cat_name or "Category", ws_name),
+            DiagResult.CONFIDENCE_CONFIRMED,
+            SRC
+        ))
+        results.extend(geom_results)
+        return results
+
+    # 4. Case C: Fallback for Revit < 2024 (is_element_rendered is None)
     if host_cat_id is not None:
         try:
             if host_view.GetCategoryHidden(host_cat_id):
                 results.append(_error(
                     "CAT_HIDDEN",
                     "Category Hidden (Host V/G)",
-                    "Category '%s' is hidden in the host view's Visibility/Graphics.  "
-                    "Custom mode still respects host category visibility unless overridden."
-                    % cat_name,
+                    "Category '%s' is hidden in the host view's Visibility/Graphics." % cat_name,
                     DiagResult.CONFIDENCE_POSSIBLE, SRC))
             else:
                 results.append(_pass(
                     "CAT_VISIBLE",
                     "Category Visible (Host V/G)",
-                    "Category '%s' appears visible in the host view."
-                    % cat_name, SRC))
+                    "Category '%s' appears visible in the host view." % cat_name, SRC))
         except Exception:
             pass
 
-    # Workset check in Custom mode
+    tmpl_desc = (u"View Template '%s'" % template_name) if template_name else u"Visibility/Graphics (VG)"
+    results.append(_warning(
+        "LINK_CUSTOM_CAT_CHECK",
+        "Check Link Model Categories Overrides: '%s'" % (cat_name or "Element"),
+        "Under Custom display settings (controlled by %s), verify in the link's "
+        "Model Categories tab that '%s' is checked." % (tmpl_desc, cat_name or "Category"),
+        DiagResult.CONFIDENCE_POSSIBLE, SRC))
+
     results.extend(diagnose_linked_element_workset(
-        host_doc, link_doc, link_instance, linked_element, host_view, "Custom", template_name, is_element_rendered=is_element_rendered))
-
-    # Geometry and Masking (Host View vs Linked Element)
-    try:
-        link_transform = link_instance.GetTotalTransform()
-        results.extend(diagnose_geometry_visibility(host_doc, linked_element, host_view, link_transform))
-        results.extend(diagnose_masking_occlusion(host_doc, linked_element, host_view, link_transform))
-    except Exception as ex:
-        results.append(_unknown(
-            "LINK_GEOM_UNKNOWN",
-            "Linked Geometry Checks",
-            "Unable to run geometric or masking checks for the linked element: %s" % str(ex), SRC))
-
+        host_doc, link_doc, link_instance, linked_element, host_view, "Custom", template_name, is_element_rendered=None))
+    results.extend(geom_results)
     return results
 
 
