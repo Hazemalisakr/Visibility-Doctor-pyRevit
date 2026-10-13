@@ -78,6 +78,8 @@ BLOCKER_PRIORITY = {
     "LINK_INSTANCE_HIDDEN":       1,
     "LINK_CAT_HIDDEN":            2,
     "LINK_WORKSET_HIDDEN":        3,
+    "LINK_CUSTOM_WORKSET_HIDDEN": 3,
+    "LINK_CUSTOM_CATEGORY_HIDDEN": 3,
     "LINK_CUSTOM_OVERRIDE_BLOCKER": 3,
     "LINK_ELEM_WORKSET_CLOSED":   4,
     "LINK_ELEM_WORKSET_HOST_HIDDEN": 5,
@@ -189,6 +191,23 @@ def get_element_info(doc, element):
     """Return a dict of display-friendly element properties."""
     info = {"id": str(element.Id.IntegerValue)}
 
+    # Element Name (matches Linked Element ID tool)
+    try:
+        name = element.Name
+        if name:
+            info["name"] = name
+    except Exception:
+        pass
+    if not info.get("name"):
+        try:
+            type_id = element.GetTypeId()
+            if type_id and type_id != ElementId.InvalidElementId:
+                etype = doc.GetElement(type_id)
+                if etype and etype.Name:
+                    info["name"] = etype.Name
+        except Exception:
+            pass
+
     if element.Category:
         info["category"] = element.Category.Name
 
@@ -198,7 +217,12 @@ def get_element_info(doc, element):
         if type_id and type_id != ElementId.InvalidElementId:
             etype = doc.GetElement(type_id)
             if etype:
-                info["type"] = getattr(etype, "Name", "") or ""
+                t_name = getattr(etype, "Name", "") or ""
+                if not t_name:
+                    p = etype.get_Parameter(BuiltInParameter.SYMBOL_NAME_PARAM)
+                    if p:
+                        t_name = p.AsString() or ""
+                info["type"] = t_name
                 if hasattr(etype, "FamilyName"):
                     fn = etype.FamilyName
                     if fn:
@@ -1919,12 +1943,14 @@ def diagnose_link_element_in_context(
 
     # 1. Query Revit 2024+ link-view collector to verify if element is rendered
     is_element_rendered = None
+    visible_ids = None
     try:
         coll = FilteredElementCollector(host_doc, host_view.Id, link_instance.Id)
         visible_ids = set(coll.ToElementIds())
         is_element_rendered = (linked_element.Id in visible_ids)
     except Exception:
         is_element_rendered = None
+        visible_ids = None
 
     # 2. Temporary Hide / Isolate active on host view
     try:
@@ -1952,7 +1978,7 @@ def diagnose_link_element_in_context(
     else:
         sub_results = _check_custom_mode(
             host_doc, link_doc, link_instance, linked_element, host_view, template_name,
-            is_element_rendered=is_element_rendered)
+            is_element_rendered=is_element_rendered, visible_ids=visible_ids)
 
     results.extend(sub_results)
 
@@ -1964,6 +1990,7 @@ def diagnose_link_element_in_context(
             "The linked element is confirmed visible in this view (not hidden via Hide in View / HE).",
             SRC))
     elif is_element_rendered is False:
+        has_manual_hidden = any(r.code == "LINK_ELEM_MANUAL_HIDDEN" for r in results)
         has_confirmed_blocker = any(
             r.status == DiagResult.STATUS_BLOCKED for r in results
         )
@@ -1979,7 +2006,7 @@ def diagnose_link_element_in_context(
                 "2. Find this element (highlighted in magenta/red).\n"
                 "3. Select it, right-click, and choose 'Unhide in View > Elements'.",
                 DiagResult.CONFIDENCE_CONFIRMED, SRC))
-        else:
+        elif not has_manual_hidden:
             results.append(_pass(
                 "LINK_ELEM_MANUAL_HIDE_DEFERRED",
                 "Manual Hide: Deferred",
@@ -2197,7 +2224,7 @@ def _check_by_linked_view(
     return results
 
 
-def _check_custom_mode(host_doc, link_doc, link_instance, linked_element, host_view, template_name=None, is_element_rendered=None):
+def _check_custom_mode(host_doc, link_doc, link_instance, linked_element, host_view, template_name=None, is_element_rendered=None, visible_ids=None):
     """Custom display: category, worksets, geometry & masking."""
     SRC = "diagnose_link_element_custom"
     results = []
@@ -2238,36 +2265,138 @@ def _check_custom_mode(host_doc, link_doc, link_instance, linked_element, host_v
             return results
 
         # Geometry is within range! Under Custom mode, the link has independent V/G overrides:
-        # The user can turn off the Category (e.g. Walls) or Worksets specifically for this link.
+        # We deduce mathematically whether Category, Workset, or Individual Hide (HE) is the blocker
+        # by checking if other elements of this Category vs this Workset exist in visible_ids.
         li_name = getattr(link_instance, "Name", "") or "Linked Model"
         ws_id = getattr(linked_element, "WorksetId", None)
-        ws_name = "Workset"
-        if ws_id and ws_id.IntegerValue > 0:
+        ws_name = None
+        if ws_id and ws_id.IntegerValue > 0 and link_doc.IsWorkshared:
             try:
                 ws = link_doc.GetWorksetTable().GetWorkset(ws_id)
-                if ws: ws_name = ws.Name
+                if ws:
+                    ws_name = ws.Name
             except Exception:
                 pass
+
         tmpl_desc = (u"View Template '%s'" % template_name) if template_name else u"Visibility/Graphics (VG)"
-        results.append(_error(
-            "LINK_CUSTOM_OVERRIDE_BLOCKER",
-            "Link Category or Workset Overridden: '%s'" % (cat_name or "Element"),
-            "The element is not rendered in this view, and this link uses 'Custom' display settings "
-            "(controlled by %s).\n\n"
-            "In Custom mode, individual categories (such as '%s') and worksets can be turned off "
-            "specifically for this link without affecting the host view. "
-            "Because the Revit API does not expose per-link category checkboxes to add-ins, verify:\n\n"
-            "1. Open %s > Revit Links tab.\n"
-            "2. Click the Display Settings button for '%s'.\n"
-            "3. In the Model Categories tab, ensure '%s' is checked.\n"
-            "4. In the Worksets tab, ensure '%s' is checked and set to Open.\n"
-            "5. If both are on, the element may have been manually hidden in view (HE / Reveal Hidden)."
-            % (tmpl_desc, cat_name or "Category", tmpl_desc, li_name, cat_name or "Category", ws_name),
-            DiagResult.CONFIDENCE_CONFIRMED,
-            SRC
-        ))
-        results.extend(geom_results)
-        return results
+
+        # Check if category has any visible elements rendered in this view
+        cat_has_visible = False
+        if linked_element.Category:
+            try:
+                cat_filter = ElementCategoryFilter(linked_element.Category.Id)
+                cat_elems = FilteredElementCollector(link_doc).WherePasses(cat_filter).WhereElementIsNotElementType().ToElementIds()
+                if visible_ids is not None:
+                    for eid in cat_elems:
+                        if eid in visible_ids:
+                            cat_has_visible = True
+                            break
+            except Exception:
+                pass
+
+        # Check if workset has any visible elements rendered in this view
+        ws_has_visible = False
+        if ws_id and ws_id.IntegerValue > 0 and link_doc.IsWorkshared:
+            try:
+                ws_filter = ElementWorksetFilter(ws_id)
+                ws_elems = FilteredElementCollector(link_doc).WherePasses(ws_filter).WhereElementIsNotElementType().ToElementIds()
+                if visible_ids is not None:
+                    for eid in ws_elems:
+                        if eid in visible_ids:
+                            ws_has_visible = True
+                            break
+            except Exception:
+                pass
+
+        # Deduction 1: Category elements ARE visible, but zero elements of this Workset are visible -> WORKSET HIDDEN
+        if cat_has_visible and not ws_has_visible and ws_name:
+            results.append(_error(
+                "LINK_CUSTOM_WORKSET_HIDDEN",
+                "Linked Workset Hidden in View: '%s'" % ws_name,
+                "The element is hidden because its workset '%s' is turned off in the Revit Link display settings.\n\n"
+                "Diagnostics verified that other elements in Category '%s' are visible in this view, "
+                "confirming the category is active, but NO elements from workset '%s' are rendered.\n\n"
+                "How to fix:\n"
+                "1. Open %s > Revit Links tab.\n"
+                "2. Click the Display Settings button for '%s'.\n"
+                "3. In the Worksets tab, select '%s' and set it to 'Show' (or 'Open')."
+                % (ws_name, cat_name or "this category", ws_name, tmpl_desc, li_name, ws_name),
+                DiagResult.CONFIDENCE_CONFIRMED,
+                SRC
+            ))
+            results.extend(geom_results)
+            return results
+
+        # Deduction 2: Workset elements ARE visible, but zero elements of this Category are visible -> CATEGORY HIDDEN
+        elif ws_has_visible and not cat_has_visible and cat_name:
+            results.append(_error(
+                "LINK_CUSTOM_CATEGORY_HIDDEN",
+                "Linked Category Hidden in View: '%s'" % cat_name,
+                "The element is hidden because Category '%s' is turned off in the Revit Link display settings.\n\n"
+                "Diagnostics verified that other elements on workset '%s' are visible in this view, "
+                "confirming the workset is active, but NO elements from Category '%s' are rendered.\n\n"
+                "How to fix:\n"
+                "1. Open %s > Revit Links tab.\n"
+                "2. Click the Display Settings button for '%s'.\n"
+                "3. In the Model Categories tab, find '%s' and check the checkbox to turn it on."
+                % (cat_name, ws_name or "this workset", cat_name, tmpl_desc, li_name, cat_name),
+                DiagResult.CONFIDENCE_CONFIRMED,
+                SRC
+            ))
+            results.extend(geom_results)
+            return results
+
+        # Deduction 3: Both Category AND Workset elements are visible -> ELEMENT MANUALLY HIDDEN (HE)
+        elif cat_has_visible and (ws_has_visible or not link_doc.IsWorkshared):
+            results.append(_error(
+                "LINK_ELEM_MANUAL_HIDDEN",
+                "Element Manually Hidden in View (HE / Reveal Hidden)",
+                "The linked element is not rendered in this view even though other elements of Category '%s' "
+                "and Workset '%s' are visible, and the element is within the view range.\n\n"
+                "This indicates the element was individually hidden using 'Hide in View > Elements' "
+                "(keyboard shortcut HE or EH).\n\n"
+                "How to fix:\n"
+                "1. In the View Control Bar at the bottom of the Revit window, click the lightbulb icon ('Reveal Hidden Elements').\n"
+                "2. Find this element (highlighted in magenta/red).\n"
+                "3. Select it, right-click, and choose 'Unhide in View > Elements' (or press EU).\n"
+                "4. Click the lightbulb again to exit Reveal Hidden Elements mode."
+                % (cat_name or "Category", ws_name or "Workset"),
+                DiagResult.CONFIDENCE_CONFIRMED,
+                SRC
+            ))
+            results.extend(geom_results)
+            return results
+
+        # Deduction 4: Neither is visible (or link only contains this category/workset)
+        else:
+            ws_label = ("or Workset '%s'" % ws_name) if ws_name else "or Workset"
+            results.append(_error(
+                "LINK_CUSTOM_OVERRIDE_BLOCKER",
+                "Link Override: Category '%s' %s" % (cat_name or "Element", ws_label),
+                "The element is not rendered in this view, and this link uses 'Custom' display settings "
+                "(controlled by %s).\n\n"
+                "In Custom mode, individual categories (such as '%s') and worksets%s can be turned off "
+                "specifically for this link without affecting the host view.\n\n"
+                "How to fix:\n"
+                "1. Open %s > Revit Links tab.\n"
+                "2. Click the Display Settings button for '%s'.\n"
+                "3. In the Model Categories tab, ensure '%s' is checked.\n"
+                "4. In the Worksets tab, ensure '%s' is checked and set to Show/Open.\n"
+                "5. If both are on, the element may have been manually hidden in view (HE / Reveal Hidden)."
+                % (
+                    tmpl_desc,
+                    cat_name or "Category",
+                    (" ('%s')" % ws_name) if ws_name else "",
+                    tmpl_desc,
+                    li_name,
+                    cat_name or "Category",
+                    ws_name or "Workset"
+                ),
+                DiagResult.CONFIDENCE_CONFIRMED,
+                SRC
+            ))
+            results.extend(geom_results)
+            return results
 
     # 4. Case C: Fallback for Revit < 2024 (is_element_rendered is None)
     if host_cat_id is not None:
@@ -2683,6 +2812,8 @@ class VisibilityDoctorWindow(forms.WPFWindow):
             info = get_element_info(elem_doc, element)
             if link_str:
                 info["link_instance"] = link_str
+            if link_instance and elem_doc:
+                info["linked_model"] = getattr(elem_doc, "Title", "") or "Linked Model"
             self._add_element_summary(info, view.Name)
         else:
             if link_str:
@@ -2772,7 +2903,9 @@ class VisibilityDoctorWindow(forms.WPFWindow):
         sp.Children.Add(hdr)
 
         fields = [
+            ("Linked Model", info.get("linked_model")),
             ("Link Instance", info.get("link_instance")),
+            ("Element", info.get("name")),
             ("ID", info.get("id", "?")),
             ("Category", info.get("category")),
             ("Family", info.get("family")),
