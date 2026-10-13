@@ -98,8 +98,9 @@ BLOCKER_PRIORITY = {
     "GEOM_OUTSIDE_CROP":          23,
     "GEOM_OUTSIDE_SECTION_BOX":   24,
     "GEOM_MASKED":                25,
-    "LINK_ELEM_WORKSET_CUSTOM":   26,
-    "LINK_ELEM_WORKSET_BY_HOST":  27,
+    "LINK_ELEM_MANUAL_HIDE_POSSIBLE": 26,
+    "LINK_ELEM_WORKSET_CUSTOM":   27,
+    "LINK_ELEM_WORKSET_BY_HOST":  28,
 }
 
 # BuiltInParameter IDs used for view-template V/G-group mapping.
@@ -1907,18 +1908,47 @@ def diagnose_link_element_in_context(
     SRC = "diagnose_link_element_in_context"
     results = []
 
+    # 1. Temporary Hide / Isolate active on host view
+    try:
+        if hasattr(TemporaryViewMode, "TemporaryHideIsolate"):
+            if host_view.IsInTemporaryViewMode(TemporaryViewMode.TemporaryHideIsolate):
+                results.append(_error(
+                    "TEMP_HIDE_ISOLATE_ACTIVE",
+                    "Temporary Hide/Isolate Is Active",
+                    "The host view is in Temporary Hide/Isolate mode (cyan border). "
+                    "Elements in linked models may be temporarily hidden or isolated. "
+                    "Reset Temporary Hide/Isolate (shortcut HR) to restore visibility.",
+                    DiagResult.CONFIDENCE_POSSIBLE, SRC))
+    except Exception:
+        pass
+
+    # 2. Manual Hide in View check (HE / EH)
+    # The Autodesk Revit API does not expose per-element manual hide overrides on linked models.
+    results.append(_warning(
+        "LINK_ELEM_MANUAL_HIDE_POSSIBLE",
+        "Check Manual Hide in View (HE / Reveal Hidden)",
+        "Individual elements inside a linked model can be hidden in this view using "
+        "'Hide in View > Elements' (keyboard shortcut HE or EH).\n\n"
+        "Because the Revit API does not expose per-element manual hide states "
+        "for linked models to external tools, this cannot be confirmed programmatically.\n\n"
+        "To verify if this element was hidden:\n"
+        "1. Click the 'Reveal Hidden Elements' lightbulb icon at the bottom of the Revit window.\n"
+        "2. If this element highlights in magenta/red, it was manually hidden in this view.\n"
+        "3. Select it, right-click, and choose 'Unhide in View > Elements'.",
+        DiagResult.CONFIDENCE_POSSIBLE, SRC))
+
     if display_mode == "ByLinkedView":
-        return _check_by_linked_view(
+        results.extend(_check_by_linked_view(
             host_doc, link_doc, link_instance, linked_element,
-            host_view, linked_view_id)
+            host_view, linked_view_id))
+    elif display_mode == "ByHostView":
+        results.extend(_check_by_host_view(
+            host_doc, link_doc, link_instance, linked_element, host_view, template_name))
+    else:
+        results.extend(_check_custom_mode(
+            host_doc, link_doc, link_instance, linked_element, host_view, template_name))
 
-    if display_mode == "ByHostView":
-        return _check_by_host_view(
-            host_doc, link_doc, link_instance, linked_element, host_view, template_name)
-
-    # Custom or Unknown — partial
-    return _check_custom_mode(
-        host_doc, link_doc, link_instance, linked_element, host_view, template_name)
+    return results
 
 
 def _check_by_host_view(host_doc, link_doc, link_instance, linked_element, host_view, template_name=None):
