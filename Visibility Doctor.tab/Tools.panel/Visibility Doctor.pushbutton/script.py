@@ -778,7 +778,7 @@ def diagnose_phasing(doc, element, view):
         pc_param = element.get_Parameter(BuiltInParameter.PHASE_CREATED)
     except Exception:
         pass
-    if pc_param is None:
+    if pc_param is None or pc_param.AsElementId() == ElementId.InvalidElementId:
         results.append(_pass(
             "PHASE_NA", "Phasing Not Applicable",
             "This element does not carry phase information.", SRC))
@@ -804,6 +804,12 @@ def diagnose_phasing(doc, element, view):
 
         # Element's phase status in the view's phase
         status = element.GetPhaseStatus(vp_id)
+        if hasattr(ElementPhaseStatus, "None") and status == getattr(ElementPhaseStatus, "None"):
+            results.append(_pass(
+                "PHASE_NA", "Phasing Not Applicable",
+                "This element does not have a phase status in this view.", SRC))
+            return results
+
         status_name = str(status).split(".")[-1]   # e.g. "Past"
 
         # View's phase filter
