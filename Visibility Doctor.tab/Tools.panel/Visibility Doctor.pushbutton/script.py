@@ -88,6 +88,7 @@ BLOCKER_PRIORITY = {
     "ELEM_WRONG_OWNER_VIEW":      13,
     "TEMP_HIDE_ISOLATE_ACTIVE":   14,
     "ELEM_HIDDEN":                15,
+    "LINK_ELEM_MANUAL_HIDDEN":    15,
     "CAT_HIDDEN":                 16,
     "WORKSET_HIDDEN":             17,
     "FILTER_HIDDEN":              18,
@@ -1803,7 +1804,7 @@ def _map_linked_cat_to_host(host_doc, linked_element):
 
 
 def diagnose_linked_element_workset(
-    host_doc, link_doc, link_instance, linked_element, host_view, display_mode, template_name=None
+    host_doc, link_doc, link_instance, linked_element, host_view, display_mode, template_name=None, is_element_rendered=None
 ):
     """Diagnose workset visibility for an element inside a linked model."""
     SRC = "diagnose_linked_element_workset"
@@ -1840,6 +1841,16 @@ def diagnose_linked_element_workset(
             "click 'Manage Worksets', select '%s' and click 'Open'."
             % (ws_name, li_name, ws_name),
             DiagResult.CONFIDENCE_CONFIRMED, SRC))
+        return results
+
+    # If the element is confirmed rendered in the view by Revit's graphics engine:
+    if is_element_rendered is True:
+        results.append(_pass(
+            "LINK_ELEM_WORKSET_OK",
+            "Linked Workset: '%s'" % ws_name,
+            "Workset '%s' is open and elements on it are confirmed visible in this view."
+            % ws_name,
+            SRC))
         return results
 
     # 2. If Link Display Settings is Custom:
@@ -1883,14 +1894,12 @@ def diagnose_linked_element_workset(
             pass
 
     if not host_match_hidden:
-        results.append(_warning(
-            "LINK_ELEM_WORKSET_BY_HOST",
+        results.append(_pass(
+            "LINK_ELEM_WORKSET_OK",
             "Linked Workset: '%s'" % ws_name,
-            "The element belongs to workset '%s' in the linked model. "
-            "Under 'By Host View', verify that this workset was not closed upon loading "
-            "(Manage > Manage Links > Manage Worksets) and that host view workset rules do not hide it."
+            "Workset '%s' is open in the linked model and is visible under 'By Host View'."
             % ws_name,
-            DiagResult.CONFIDENCE_POSSIBLE, SRC))
+            SRC))
 
     return results
 
@@ -1908,7 +1917,16 @@ def diagnose_link_element_in_context(
     SRC = "diagnose_link_element_in_context"
     results = []
 
-    # 1. Temporary Hide / Isolate active on host view
+    # 1. Query Revit 2024+ link-view collector to verify if element is rendered
+    is_element_rendered = None
+    try:
+        coll = FilteredElementCollector(host_doc, host_view.Id, link_instance.Id)
+        visible_ids = set(coll.ToElementIds())
+        is_element_rendered = (linked_element.Id in visible_ids)
+    except Exception:
+        is_element_rendered = None
+
+    # 2. Temporary Hide / Isolate active on host view
     try:
         if hasattr(TemporaryViewMode, "TemporaryHideIsolate"):
             if host_view.IsInTemporaryViewMode(TemporaryViewMode.TemporaryHideIsolate):
@@ -1922,36 +1940,66 @@ def diagnose_link_element_in_context(
     except Exception:
         pass
 
-    # 2. Manual Hide in View check (HE / EH)
-    # The Autodesk Revit API does not expose per-element manual hide overrides on linked models.
-    results.append(_warning(
-        "LINK_ELEM_MANUAL_HIDE_POSSIBLE",
-        "Check Manual Hide in View (HE / Reveal Hidden)",
-        "Individual elements inside a linked model can be hidden in this view using "
-        "'Hide in View > Elements' (keyboard shortcut HE or EH).\n\n"
-        "Because the Revit API does not expose per-element manual hide states "
-        "for linked models to external tools, this cannot be confirmed programmatically.\n\n"
-        "To verify if this element was hidden:\n"
-        "1. Click the 'Reveal Hidden Elements' lightbulb icon at the bottom of the Revit window.\n"
-        "2. If this element highlights in magenta/red, it was manually hidden in this view.\n"
-        "3. Select it, right-click, and choose 'Unhide in View > Elements'.",
-        DiagResult.CONFIDENCE_POSSIBLE, SRC))
-
+    # Mode-specific checks
     if display_mode == "ByLinkedView":
-        results.extend(_check_by_linked_view(
+        sub_results = _check_by_linked_view(
             host_doc, link_doc, link_instance, linked_element,
-            host_view, linked_view_id))
+            host_view, linked_view_id)
     elif display_mode == "ByHostView":
-        results.extend(_check_by_host_view(
-            host_doc, link_doc, link_instance, linked_element, host_view, template_name))
+        sub_results = _check_by_host_view(
+            host_doc, link_doc, link_instance, linked_element, host_view, template_name,
+            is_element_rendered=is_element_rendered)
     else:
-        results.extend(_check_custom_mode(
-            host_doc, link_doc, link_instance, linked_element, host_view, template_name))
+        sub_results = _check_custom_mode(
+            host_doc, link_doc, link_instance, linked_element, host_view, template_name,
+            is_element_rendered=is_element_rendered)
+
+    results.extend(sub_results)
+
+    # 3. Manual Hide in View check (HE / EH)
+    if is_element_rendered is True:
+        results.append(_pass(
+            "LINK_ELEM_NOT_HIDDEN",
+            "Manual Hide: Not Hidden",
+            "The linked element is confirmed visible in this view (not hidden via Hide in View / HE).",
+            SRC))
+    elif is_element_rendered is False:
+        has_confirmed_blocker = any(
+            r.status == DiagResult.STATUS_BLOCKED for r in results
+        )
+        if not has_confirmed_blocker:
+            results.append(_error(
+                "LINK_ELEM_MANUAL_HIDDEN",
+                "Element Manually Hidden in View (HE / Reveal Hidden)",
+                "The element is not rendered in this view even though its category, "
+                "workset, and view range are all visible. It was hidden using "
+                "'Hide in View > Elements' (keyboard shortcut HE or EH).\n\n"
+                "To restore it:\n"
+                "1. Click the 'Reveal Hidden Elements' lightbulb icon at the bottom of the Revit window.\n"
+                "2. Find this element (highlighted in magenta/red).\n"
+                "3. Select it, right-click, and choose 'Unhide in View > Elements'.",
+                DiagResult.CONFIDENCE_CONFIRMED, SRC))
+        else:
+            results.append(_pass(
+                "LINK_ELEM_MANUAL_HIDE_DEFERRED",
+                "Manual Hide: Deferred",
+                "Other confirmed visibility blockers explain why this element is not rendered in the view.",
+                SRC))
+    else:
+        # Fallback for Revit < 2024
+        results.append(_warning(
+            "LINK_ELEM_MANUAL_HIDE_POSSIBLE",
+            "Check Manual Hide in View (HE / Reveal Hidden)",
+            "Individual elements inside a linked model can be hidden in this view using "
+            "'Hide in View > Elements' (keyboard shortcut HE or EH).\n\n"
+            "Because this Revit version cannot query linked element view visibility programmatically, "
+            "verify using Reveal Hidden Elements (lightbulb icon).",
+            DiagResult.CONFIDENCE_POSSIBLE, SRC))
 
     return results
 
 
-def _check_by_host_view(host_doc, link_doc, link_instance, linked_element, host_view, template_name=None):
+def _check_by_host_view(host_doc, link_doc, link_instance, linked_element, host_view, template_name=None, is_element_rendered=None):
     """ByHostView: use host view V/G for linked element's category."""
     SRC = "diagnose_link_element_by_host"
     results = []
@@ -2047,14 +2095,20 @@ def _check_by_host_view(host_doc, link_doc, link_instance, linked_element, host_
 
     # --- Linked element workset diagnosis ---
     results.extend(diagnose_linked_element_workset(
-        host_doc, link_doc, link_instance, linked_element, host_view, "ByHostView", template_name))
+        host_doc, link_doc, link_instance, linked_element, host_view, "ByHostView", template_name, is_element_rendered=is_element_rendered))
 
-    results.append(_unknown(
-        "LINK_ELEM_PHASE_UNKNOWN",
-        "Linked Element Phasing (By Host View)",
-        "Phase mapping between the linked document and the host view "
-        "cannot be reliably determined.  Do not compare phase names "
-        "across documents.", SRC))
+    if is_element_rendered is True:
+        results.append(_pass(
+            "LINK_ELEM_PHASE_OK",
+            "Phase (Linked Element)",
+            "The linked element is confirmed rendered in this view; phasing does not block it.", SRC))
+    else:
+        results.append(_unknown(
+            "LINK_ELEM_PHASE_UNKNOWN",
+            "Linked Element Phasing (By Host View)",
+            "Phase mapping between the linked document and the host view "
+            "cannot be reliably determined.  Do not compare phase names "
+            "across documents.", SRC))
 
     # --- Geometry and Masking (Host View vs Linked Element) ---
     try:
@@ -2143,7 +2197,7 @@ def _check_by_linked_view(
     return results
 
 
-def _check_custom_mode(host_doc, link_doc, link_instance, linked_element, host_view, template_name=None):
+def _check_custom_mode(host_doc, link_doc, link_instance, linked_element, host_view, template_name=None, is_element_rendered=None):
     """Custom display: category, worksets, geometry & masking."""
     SRC = "diagnose_link_element_custom"
     results = []
@@ -2171,7 +2225,7 @@ def _check_custom_mode(host_doc, link_doc, link_instance, linked_element, host_v
 
     # Workset check in Custom mode
     results.extend(diagnose_linked_element_workset(
-        host_doc, link_doc, link_instance, linked_element, host_view, "Custom", template_name))
+        host_doc, link_doc, link_instance, linked_element, host_view, "Custom", template_name, is_element_rendered=is_element_rendered))
 
     # Geometry and Masking (Host View vs Linked Element)
     try:
